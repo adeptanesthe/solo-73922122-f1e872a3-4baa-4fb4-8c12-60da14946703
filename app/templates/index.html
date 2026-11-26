@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>大幅网点图分条打样 · Floyd–Steinberg 误差扩散</title>
+<style>
+  :root {
+    --bg:#0f1420; --panel:#171e2e; --line:#2a3550; --text:#e6ebf5;
+    --muted:#8a97b1; --accent:#5b8cff; --ok:#2fbf71; --warn:#ff8a3d;
+    --bad:#ff5d6c; --black-mark:#4080ff; --white-mark:#ff5050;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+         background:var(--bg); color:var(--text); font-size:14px; }
+  header { padding:14px 22px; border-bottom:1px solid var(--line);
+           display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; }
+  .layout { display:grid; grid-template-columns:300px 1fr; min-height:calc(100vh - 52px); }
+  aside { background:var(--panel); border-right:1px solid var(--line);
+          padding:16px; overflow:auto; }
+  main { padding:18px 22px; overflow:auto; }
+  .card { border:1px solid var(--line); border-radius:10px; padding:13px; margin-bottom:14px;
+          background:#121a2b; }
+  .card h2 { font-size:13px; margin:0 0 10px; color:var(--accent); letter-spacing:.5px; }
+  label { display:block; color:var(--muted); margin:8px 0 4px; font-size:12px; }
+  input[type=number], input[type=text] {
+    width:100%; background:#0d1322; border:1px solid var(--line); color:var(--text);
+    border-radius:6px; padding:7px 9px; font-size:13px; }
+  button { cursor:pointer; border:1px solid var(--line); background:#1d2740; color:var(--text);
+           border-radius:7px; padding:8px 11px; font-size:13px; margin:3px 4px 3px 0; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--bad); }
+  .modes label { display:inline-flex; align-items:center; gap:5px; color:var(--text);
+                 margin:0 8px 0 0; font-size:13px; }
+  .modes { display:flex; gap:6px; flex-wrap:wrap; }
+  .kv { display:flex; justify-content:space-between; font-size:12px; color:var(--muted);
+        padding:2px 0; }
+  .kv b { color:var(--text); font-weight:600; }
+  .strip-item { display:flex; justify-content:space-between; align-items:center;
+                border:1px solid var(--line); border-radius:7px; padding:6px 9px; margin:6px 0;
+                font-size:12px; background:#0d1322; }
+  .strip-item button { padding:2px 7px; margin:0; font-size:11px; }
+  .canvas-wrap { position:relative; display:inline-block; background:#0a0f1a;
+                 border:1px solid var(--line); border-radius:8px; overflow:auto; max-width:100%; }
+  canvas { display:block; image-rendering:pixelated; }
+  .overlay { position:absolute; inset:0; }
+  .legend { display:flex; gap:14px; flex-wrap:wrap; color:var(--muted); font-size:12px;
+            margin:8px 0; }
+  .swatch { display:inline-block; width:11px; height:11px; border-radius:2px;
+            vertical-align:-1px; margin-right:4px; }
+  .msg { border-radius:8px; padding:10px 12px; margin:8px 0; font-size:13px; line-height:1.55; }
+  .msg.ok { background:rgba(47,191,113,.12); border:1px solid var(--ok); }
+  .msg.bad { background:rgba(255,93,108,.12); border:1px solid var(--bad); }
+  .msg.info { background:rgba(91,140,255,.10); border:1px solid var(--accent); }
+  .rev-item { font-size:12px; border-left:3px solid var(--line); padding:5px 9px; margin:6px 0;
+              color:var(--muted); }
+  .rev-item.latest { border-left-color:var(--ok); color:var(--text); }
+  .tabs { display:flex; gap:6px; margin-bottom:10px; }
+  .tabs button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .muted { color:var(--muted); }
+  code { background:#0d1322; padding:1px 5px; border-radius:4px; }
+  .uploader { border:1px dashed var(--line); border-radius:9px; padding:16px; text-align:center; }
+  .uploader input { display:none; }
+  .uploader label { color:var(--text); margin:0; cursor:pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>大幅网点图分条打样系统</h1>
+  <span class="sub">Floyd–Steinberg 误差扩散 · 8 位灰度 PNG（宽高 ≤ 2048）· 续算与从头重算逐像素一致</span>
+</header>
+
+<div class="layout">
+  <aside>
+    <div class="card">
+      <h2>1. 输入图像</h2>
+      <div class="uploader">
+        <input id="file" type="file" accept="image/png" />
+        <label for="file">点击选择灰度 PNG 上传</label>
+      </div>
+      <button class="primary" id="btnSample" style="width:100%;margin-top:9px;">载入内置样图（演示改色波及条带）</button>
+      <div id="imgInfo" class="muted" style="margin-top:8px;font-size:12px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>2. 已打样条带（按行号）</h2>
+      <label>起始行（1 基，含）</label>
+      <input id="stripTop" type="number" min="1" placeholder="例如 33" />
+      <label>结束行（1 基，含）</label>
+      <input id="stripBottom" type="number" min="1" placeholder="例如 64" />
+      <label>备注（可选）</label>
+      <input id="stripLabel" type="text" placeholder="例如 第一批已打样" />
+      <button class="primary" id="btnAddStrip" style="width:100%;margin-top:8px;">登记条带</button>
+      <div id="stripList"></div>
+    </div>
+
+    <div class="card">
+      <h2>3. 框选强制色</h2>
+      <div class="modes">
+        <label><input type="radio" name="mode" value="black" checked />
+          <span class="swatch" style="background:var(--black-mark)"></span>强制黑</label>
+        <label><input type="radio" name="mode" value="white" />
+          <span class="swatch" style="background:var(--white-mark)"></span>强制白</label>
+        <label><input type="radio" name="mode" value="clear" />清除强制色</label>
+      </div>
+      <p class="muted" style="font-size:12px;margin:8px 0 0;">
+        在右侧预览上按住鼠标拖出矩形，松开即提交。系统从最近检查点续算
+        （最多回退 31 行），并逐像素比对所有已打样条带。</p>
+      <div id="rectInfo" class="muted" style="font-size:12px;margin-top:6px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>4. 输出</h2>
+      <button id="btnDownload" class="primary" style="width:100%;">下载当前稿黑白 PNG</button>
+      <div class="legend" style="margin-top:8px;">
+        <span><span class="swatch" style="background:var(--black-mark)"></span>强制黑</span>
+        <span><span class="swatch" style="background:var(--white-mark)"></span>强制白</span>
+        <span><span class="swatch" style="background:#00dc5a"></span>候选变色点</span>
+        <span><span class="swatch" style="background:#ffaa00"></span>条带首个变色点</span>
+      </div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="tabs">
+      <button data-view="out" class="active">二值成稿</button>
+      <button data-view="force">强制色叠加</button>
+      <button data-view="gray">原始灰度</button>
+      <button data-view="pending">被拒候选稿</button>
+    </div>
+    <div id="messages"></div>
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="canvas"></canvas>
+      <canvas id="overlay" class="overlay"></canvas>
+    </div>
+    <div class="card" style="margin-top:14px;">
+      <h2>稿件链与缓存预算</h2>
+      <div id="budget"></div>
+      <div id="revList" style="margin-top:8px;"></div>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let state = null;
+let view = "out";
+let imgCache = {};
+let drag = null;
+
+function msg(kind, html) {
+  const el = document.createElement("div");
+  el.className = "msg " + kind;
+  el.innerHTML = html;
+  $("messages").prepend(el);
+  setTimeout(() => el.remove(), 12000);
+}
+
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+  return data;
+}
+
+async function loadImage(url) {
+  const r = await fetch(url);
+  const blob = await r.blob();
+  const bmp = await createImageBitmap(blob);
+  return bmp;
+}
+
+async function refresh(sess) {
+  state = sess || (await api("/api/session/" + state.session_id));
+  const sid = state.session_id;
+  $("imgInfo").innerHTML =
+    `尺寸 <b>${state.width} × ${state.height}</b> · 会话 <code>${sid.slice(0,8)}</code>`;
+  // 条带
+  $("stripList").innerHTML = state.strips.length
+    ? state.strips.map(s =>
+        `<div class="strip-item"><span>${s.label}：第 ${s.top_line}–${s.bottom_line} 行（0基 ${s.top}–${s.bottom - 1}）</span>
+         <button class="danger" onclick="delStrip(${s.index})">删除</button></div>`).join("")
+    : `<div class="muted" style="font-size:12px;">尚未登记条带</div>`;
+  // 预算
+  const b = state.buffer_budget;
+  $("budget").innerHTML = [
+    ["检查点缓存行 ⌈H/32⌉", b.checkpoint_rows],
+    ["工作区行", b.workspace_rows],
+    ["物理全宽误差行合计", b.physical_rows],
+    ["检查点间距 / 最大回退", `${b.block} 行 / ${b.max_rollback} 行`],
+  ].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`).join("");
+  // 稿件链
+  $("revList").innerHTML = state.revisions.map((r, i) =>
+    `<div class="rev-item ${r.revision_id === state.current_revision_id ? "latest" : ""}">
+       #${i} ${r.note}<br/>
+       强制色：黑 ${r.force.black} / 白 ${r.force.white}
+       ${r.resume_start !== null ? `· 续算起点行 ${r.resume_start}（0基）· 改动行 ${r.changed_rows.join(",")}` : "· 全量从头抖动"}
+       <br/>缓存驻留 ${r.buffer_stats.resident_rows}/${r.buffer_stats.capacity} 行
+     </div>`).join("");
+  // 图像
+  imgCache = {};
+  await drawView();
+}
+
+async function drawView() {
+  if (!state) return;
+  const sid = state.session_id;
+  const urls = {
+    gray: `/api/session/${sid}/image/gray`,
+    out: `/api/session/${sid}/image/out`,
+    force: `/api/session/${sid}/image/force`,
+    pending: `/api/session/${sid}/pending/image`,
+  };
+  const cv = $("canvas"), ov = $("overlay");
+  cv.width = ov.width = state.width;
+  cv.height = ov.height = state.height;
+  const ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  let key = view;
+  if (view === "pending" && !state.pending) {
+    msg("info", "当前没有被拒绝的候选稿，显示二值成稿。");
+    key = "out";
+  }
+  try {
+    if (!imgCache[key]) imgCache[key] = await loadImage(urls[key]);
+    ctx.drawImage(imgCache[key], 0, 0);
+  } catch (e) {
+    if (!imgCache.out) imgCache.out = await loadImage(urls.out);
+    ctx.drawImage(imgCache.out, 0, 0);
+  }
+  drawOverlay();
+}
+
+function drawOverlay() {
+  const ov = $("overlay");
+  const ctx = ov.getContext("2d");
+  ctx.clearRect(0, 0, ov.width, ov.height);
+  // 条带：青色横线 + 半透明填充
+  for (const s of state.strips) {
+    ctx.fillStyle = "rgba(0,200,220,0.10)";
+    ctx.fillRect(0, s.top, ov.width, s.bottom - s.top);
+    ctx.strokeStyle = "rgba(0,220,240,0.9)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, s.top + 0.5); ctx.lineTo(ov.width, s.top + 0.5);
+    ctx.moveTo(0, s.bottom - 0.5); ctx.lineTo(ov.width, s.bottom - 0.5);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(0,220,240,1)";
+    ctx.font = "12px sans-serif";
+    ctx.fillText(s.label, 4, s.top + 13);
+  }
+  // 被拒候选稿的首个变色点
+  if (state.pending && state.pending.violations) {
+    for (const v of state.pending.violations) {
+      const [r, c] = v.first_point;
+      ctx.strokeStyle = "#ffaa00";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(c - 5, r - 5, 10, 10);
+      ctx.beginPath();
+      ctx.moveTo(c - 8, r); ctx.lineTo(c + 8, r);
+      ctx.moveTo(c, r - 8); ctx.lineTo(c, r + 8);
+      ctx.stroke();
+    }
+  }
+  // 拖拽矩形
+  if (drag) {
+    ctx.strokeStyle = "#ffd23d";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    const x = Math.min(drag.x0, drag.x1), y = Math.min(drag.y0, drag.y1);
+    ctx.strokeRect(x + 0.5, y + 0.5, Math.abs(drag.x1 - drag.x0), Math.abs(drag.y1 - drag.y0));
+    ctx.setLineDash([]);
+  }
+}
+
+function eventPos(e) {
+  const rect = $("canvas").getBoundingClientRect();
+  const sx = $("canvas").width / rect.width, sy = $("canvas").height / rect.height;
+  return {
+    x: Math.max(0, Math.min(state.width - 1, Math.floor((e.clientX - rect.left) * sx))),
+    y: Math.max(0, Math.min(state.height - 1, Math.floor((e.clientY - rect.top) * sy))),
+  };
+}
+
+$("overlay").addEventListener("mousedown", (e) => {
+  if (!state) return;
+  const p = eventPos(e);
+  drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+});
+window.addEventListener("mousemove", (e) => {
+  if (!drag) return;
+  const p = eventPos(e);
+  drag.x1 = p.x; drag.y1 = p.y;
+  $("rectInfo").textContent =
+    `框选：x ${Math.min(drag.x0, drag.x1)}–${Math.max(drag.x0, drag.x1)}，` +
+    `y ${Math.min(drag.y0, drag.y1)}–${Math.max(drag.y0, drag.y1)}（0基像素）`;
+  drawOverlay();
+});
+window.addEventListener("mouseup", async () => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (Math.abs(d.x1 - d.x0) < 1 && Math.abs(d.y1 - d.y0) < 1) { drawOverlay(); return; }
+  const mode = document.querySelector("input[name=mode]:checked").value;
+  try {
+    const data = await api(`/api/session/${state.session_id}/force`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x0: d.x0, y0: d.y0, x1: d.x1 + 1, y1: d.y1 + 1, mode }),
+    });
+    await refresh(data.session);
+    const r = data.result;
+    if (r.accepted) {
+      msg("ok", `✅ 新稿已接受：续算起点第 <b>${r.resume_start}</b> 行（0基），` +
+        `改动行 ${r.changed_rows.join(", ")}，所有已打样条带均未变色。`);
+      view = "out";
+    } else if (r.violations && r.violations.length) {
+      msg("bad", "⛔ 换稿被拒绝：已打样条带内出现网点变色，<b>旧稿及其强制色已保留</b>。<br/>" +
+        r.violations.map(v =>
+          `· ${v.label}（行 ${v.top + 1}–${v.bottom}）首个变色点：` +
+          `第 ${v.first_point[0] + 1} 行 第 ${v.first_point[1] + 1} 列`).join("<br/>") +
+        `<br/>可切换到「被拒候选稿」页签查看绿色变色区域与橙色标记。`);
+      view = "pending";
+    } else {
+      msg("info", r.note || "强制色无实际变化。");
+    }
+    await drawView();
+  } catch (e) { msg("bad", e.message); }
+});
+
+document.querySelectorAll(".tabs button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    view = btn.dataset.view;
+    drawView();
+  });
+});
+
+$("file").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const fd = new FormData(); fd.append("image", f);
+  try {
+    const data = await api("/api/upload", { method: "POST", body: fd });
+    await refresh(data);
+    msg("ok", "上传成功，已生成第 0 稿（从头 Floyd–Steinberg 抖动）。");
+    view = "out"; await drawView();
+  } catch (err) { msg("bad", err.message); }
+});
+
+$("btnSample").addEventListener("click", async () => {
+  try {
+    const data = await api("/api/sample", { method: "POST" });
+    await refresh(data);
+    msg("ok", "已载入样图。建议流程：先登记条带（如第 1–64 行），再在条带下方框选强制黑/白，" +
+      "观察误差扩散如何波及条带并触发拒绝；在条带影响区之外改色则可正常换稿。");
+    view = "out"; await drawView();
+  } catch (err) { msg("bad", err.message); }
+});
+
+$("btnAddStrip").addEventListener("click", async () => {
+  const top_line = parseInt($("stripTop").value, 10);
+  const bottom_line = parseInt($("stripBottom").value, 10);
+  const label = $("stripLabel").value.trim();
+  if (!(top_line > 0) || !(bottom_line >= top_line)) {
+    msg("bad", "条带行号非法：需要 1 ≤ 起始行 ≤ 结束行。"); return;
+  }
+  try {
+    const data = await api(`/api/session/${state.session_id}/strips`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ top_line, bottom_line, label }),
+    });
+    await refresh(data);
+    msg("ok", `条带已登记：第 ${top_line}–${bottom_line} 行。`);
+  } catch (err) { msg("bad", err.message); }
+});
+
+window.delStrip = async (index) => {
+  try {
+    const data = await api(`/api/session/${state.session_id}/strips/${index}`,
+      { method: "DELETE" });
+    await refresh(data);
+  } catch (err) { msg("bad", err.message); }
+};
+
+$("btnDownload").addEventListener("click", () => {
+  if (!state) { msg("bad", "请先上传图像。"); return; }
+  window.location = `/api/session/${state.session_id}/download`;
+});
+</script>
+</body>
+</html>
